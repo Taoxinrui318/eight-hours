@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#254e42"><meta name="description" content="睡眠、学习、生活，各八小时。为每一刻找到归属的私人时间账本。">
+  <meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>Eight Hours · 888 时间账本</title>
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml"><link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="manifest" href="manifest.webmanifest"><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header"><a class="brand" href="#timer" aria-label="Eight Hours 首页"><span class="brand-mark"><i></i><i></i><i></i></span><span>eight hours<small>把一天，过成喜欢的样子</small></span></a><div class="header-right"><span id="connection" class="connection">本地保存</span><button class="icon-btn" id="install-btn" title="安装到主屏幕" aria-label="安装到主屏幕" hidden></button></div></header>
+    <main id="main" tabindex="-1"><div class="loading"><span class="brand-mark"><i></i><i></i><i></i></span><p>正在打开你的时间账本…</p></div></main>
+    <nav class="bottom-nav" aria-label="主导航"><a href="#timer" data-page="timer"></a><a href="#schedule" data-page="schedule"></a><a href="#report" data-page="report"></a><a href="#settings" data-page="settings"></a></nav>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <dialog id="modal"><div class="modal-head"><h2 id="modal-title"></h2><button class="icon-btn" id="modal-close" aria-label="关闭"></button></div><div id="modal-body"></div></dialog>
+  <script src="engine.js"></script><script src="app.js"></script>
+</body>
+</html>
