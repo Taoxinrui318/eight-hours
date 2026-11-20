@@ -30,7 +30,7 @@
     return [+start,+end];
   }
   function createState(now = Date.now()) {
-    return {version:1, revision:0, createdAt:now, trackingStart:null, records:[], active:null,
+    return {version:2, revision:0, createdAt:now, trackingStart:null, records:[], active:null,
       activities:clone(DEFAULT_ACTIVITIES), courses:[], targets:{sleep:480,study:480,life:480},
       dailyPlans:{}, preferences:{focusMinutes:45,sound:false}, undo:null};
   }
@@ -39,6 +39,10 @@
     return {activityId:a.id || uid(),name:a.name.trim().slice(0,60),category:a.category,kind:a.kind || 'self',icon:a.icon || 'circle'};
   }
   function pending(start,end) { return {id:uid(),start,end,activityId:'pending',name:'待补录',category:null,kind:'pending',icon:'help',note:''}; }
+  function isPaused(s) { return s.active?.kind==='paused'; }
+  function elapsed(s,now=Date.now()) { const a=s.active;if(!a)return 0;return isPaused(s)?(a.frozenElapsedMs||0):Math.max(0,now-a.start)+(a.focusElapsedMs||0); }
+  function closeSegment(a,end) { const r={...a,end};delete r.resumeActivity;delete r.frozenElapsedMs;return r; }
+  function migrateState(input) { validateState(input);const s=clone(input);if(s.version===1){s.version=2;s.undo=null;}return s; }
   function ensureStarted(s, now) {
     if (s.trackingStart === null) s.trackingStart = bounds(dateKey(s.createdAt))[0];
     if (!s.active && !s.records.length && now > s.trackingStart) s.records.push(pending(s.trackingStart,now));
@@ -46,18 +50,34 @@
   function switchActivity(input, activity, now = Date.now(), options = {}) {
     const s = clone(input), item = snapshot(activity);
     if (s.active && now < s.active.start) throw Error('系统时间早于当前记录，请校准设备时间后重试');
-    const previous = {records:clone(s.records),active:clone(s.active),trackingStart:s.trackingStart};
+    const previous = {recordCount:s.records.length,active:clone(s.active),trackingStart:s.trackingStart};
     ensureStarted(s,now);
-    if (s.active && now > s.active.start) s.records.push({...s.active,end:now});
-    s.active = {id:uid(),start:now,...item,note:String(options.note || '').slice(0,500),focusMinutes:item.category==='study' ? Number(options.focusMinutes || 0) : 0};
+    if (s.active && now > s.active.start) s.records.push(closeSegment(s.active,now));
+    s.active = {id:uid(),start:now,...item,note:String(options.note || '').slice(0,500),focusMinutes:item.category==='study' ? Number(options.focusMinutes || 0) : 0,focusElapsedMs:Number(options.focusElapsedMs||0)};
     s.undo = previous;
     return s;
   }
   function undoSwitch(input) {
     if (!input.undo) throw Error('没有可撤销的切换');
     const s=clone(input), old=s.undo;
-    s.records=old.records; s.active=old.active; s.trackingStart=old.trackingStart; s.undo=null;
+    s.records=s.records.slice(0,old.recordCount); s.active=old.active; s.trackingStart=old.trackingStart; s.undo=null;
     return s;
+  }
+  function pauseRecording(input,now=Date.now()) {
+    const s=clone(input),a=s.active;
+    if(!a)throw Error('还没有正在计时的活动');
+    if(isPaused(s))return s;
+    if(now<a.start)throw Error('系统时间早于当前记录，请校准设备时间后重试');
+    const frozenElapsedMs=elapsed(s,now);
+    const resumeActivity=a.category?{activityId:a.activityId,name:a.name,category:a.category,kind:a.kind,icon:a.icon,note:a.note||'',focusMinutes:a.focusMinutes||0,focusElapsedMs:frozenElapsedMs}:null;
+    if(now>a.start)s.records.push(closeSegment(a,now));
+    s.active={id:uid(),start:now,activityId:'__paused__',name:'暂停记录',category:null,kind:'paused',icon:'pause',note:'暂停期间不扣除任何板块余额',focusMinutes:0,frozenElapsedMs,resumeActivity};
+    s.undo=null;return s;
+  }
+  function resumeRecording(input,now=Date.now()) {
+    if(!isPaused(input)||!input.active.resumeActivity)throw Error('请选择一个活动重新开始');
+    const a=input.active.resumeActivity;
+    return switchActivity(input,{...a,id:a.activityId},now,{note:a.note,focusMinutes:a.focusMinutes,focusElapsedMs:a.focusElapsedMs});
   }
   function daySegments(s, key, now=Date.now()) {
     const [begin,finish] = bounds(key), end=Math.min(finish,now);
@@ -75,17 +95,18 @@
   }
   function totals(s,key,now=Date.now()) {
     const segs=daySegments(s,key,now), used={sleep:0,study:0,life:0,pending:0}, byActivity={};
-    let classTime=0,fun=0,essential=0,longest=0,studySegments=0;
+    let classTime=0,fun=0,essential=0,longest=0,studySegments=0,pausedTime=0,clearedTime=0,pendingTime=0;
     for(const x of segs) {
       const duration=x.end-x.start;
       used[x.category||'pending']+=duration;
+      if(!x.category){if(x.kind==='paused')pausedTime+=duration;else if(x.kind==='cleared')clearedTime+=duration;else pendingTime+=duration;}
       const k=(x.category||'pending')+'|'+x.name;
       if(!byActivity[k]) byActivity[k]={name:x.name,category:x.category,kind:x.kind,duration:0};
       byActivity[k].duration+=duration;
       if(x.category==='study') {longest=Math.max(longest,duration);studySegments++;if(x.kind==='class')classTime+=duration;}
       if(x.category==='life') {if(x.kind==='fun')fun+=duration;else essential+=duration;}
     }
-    return {segs,used,byActivity:Object.values(byActivity).sort((a,b)=>b.duration-a.duration),classTime,fun,essential,longest,studySegments};
+    return {segs,used,byActivity:Object.values(byActivity).sort((a,b)=>b.duration-a.duration),classTime,fun,essential,longest,studySegments,pausedTime,clearedTime,pendingTime};
   }
   function editInterval(input, from, to, activity, note='', now=Date.now()) {
     if(!Number.isFinite(from)||!Number.isFinite(to)||from>=to||to>now) throw Error('请选择有效的已发生时间段，结束时间不能晚于现在');
@@ -96,19 +117,34 @@
       if(now>first)s.records.push(pending(first,now));
       s.active={id:uid(),start:now,activityId:'pending',name:'待补录',category:null,kind:'pending',icon:'help',note:''};
     }
+    return replaceInterval(s,from,to,{...snapshot(activity),note:String(note).slice(0,500),focusMinutes:0});
+  }
+  function replaceInterval(s,from,to,item) {
     const pieces=[];
     for(const x of s.records.concat([{...s.active,end:Infinity}])) {
       if(x.end<=from || x.start>=to) {pieces.push(x);continue;}
-      if(x.start<from) pieces.push({...x,end:from});
-      if(x.end>to) pieces.push({...x,id:uid(),start:to});
+      if(x.start<from) pieces.push(closeSegment(x,from));
+      if(x.end>to) pieces.push({...x,id:uid(),start:to,focusElapsedMs:0});
     }
-    pieces.push({id:uid(),start:from,end:to,...snapshot(activity),note:String(note).slice(0,500),focusMinutes:0});
+    pieces.push({id:uid(),start:from,end:to,...item});
     pieces.sort((a,b)=>a.start-b.start);
     const active=pieces.pop();
     if(active.end!==Infinity) throw Error('记录修正失败');
     delete active.end; s.active=active; s.records=pieces; s.undo=null;
     validateState(s);
     return s;
+  }
+  function deleteDate(input,key,now=Date.now()) {
+    const [begin,end]=bounds(key),s=clone(input),first=s.trackingStart??bounds(dateKey(s.createdAt))[0];
+    const from=Math.max(first,begin),to=Math.min(end,now);
+    if(key<dateKey(s.createdAt)||from>=to)throw Error('请选择首次使用当天至今天之间的日期');
+    if(!s.active){ensureStarted(s,now);s.active={id:uid(),start:now,activityId:'__paused__',name:'暂停记录',category:null,kind:'paused',icon:'pause',note:'',focusMinutes:0,frozenElapsedMs:0,resumeActivity:null};}
+    if(key===dateKey(now)&&!isPaused(s)){const paused=pauseRecording(s,now);Object.assign(s,paused);}
+    if(isPaused(s)){s.active.resumeActivity=null;s.active.frozenElapsedMs=0;}
+    const next=replaceInterval(s,from,to,{activityId:'__cleared__',name:'已清理记录',category:null,kind:'cleared',icon:'trash',note:'活动明细已删除',focusMinutes:0});
+    const merged=[];
+    for(const r of next.records){const prev=merged.at(-1);if(prev?.kind==='cleared'&&r.kind==='cleared'&&prev.end===r.start)prev.end=r.end;else merged.push(r);}
+    next.records=merged;delete next.dailyPlans[key];next.undo=null;validateState(next);return next;
   }
   function updateNote(input,note) { const s=clone(input); if(!s.active)throw Error('请先开始计时');s.active.note=String(note).slice(0,500);s.undo=null;return s; }
   function isClock(v) { return typeof v==='string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(v); }
@@ -135,10 +171,13 @@
     let count=0,end=0;for(const [a,b] of spans){count+=Math.max(0,b-Math.max(a,end));end=Math.max(end,b);}return count;
   }
   function validateState(s) {
-    if(!s||s.version!==1||!Number.isFinite(s.createdAt)||!Array.isArray(s.records)||s.records.length>100000||!Array.isArray(s.activities)||s.activities.length>200||!Array.isArray(s.courses)||s.courses.length>1000)throw Error('不是有效的 Eight Hours 备份');
+    if(!s||![1,2].includes(s.version)||!Number.isFinite(s.createdAt)||!Array.isArray(s.records)||s.records.length>100000||!Array.isArray(s.activities)||s.activities.length>200||!Array.isArray(s.courses)||s.courses.length>1000)throw Error('不是有效的 Eight Hours 备份');
     if(!s.targets||CATEGORIES.some(k=>!Number.isFinite(s.targets[k])||s.targets[k]<0||s.targets[k]>1440)||CATEGORIES.reduce((n,k)=>n+s.targets[k],0)!==1440)throw Error('三类预算必须合计 24 小时');
     const validSeg=(r,closed)=>{
       if(!r||!Number.isFinite(r.start)||(closed&&(!Number.isFinite(r.end)||r.end<=r.start))||!['sleep','study','life',null].includes(r.category)||typeof r.name!=='string'||!r.name||r.name.length>60||typeof r.id!=='string'||(r.note!==undefined&&(typeof r.note!=='string'||r.note.length>500))||(r.focusMinutes!==undefined&&(!Number.isFinite(r.focusMinutes)||r.focusMinutes<0||r.focusMinutes>1440)))throw Error('备份中存在无效时间记录');
+      for(const k of ['focusElapsedMs','frozenElapsedMs'])if(r[k]!==undefined&&(!Number.isFinite(r[k])||r[k]<0))throw Error('备份累计时间不正确');
+      if(r.kind==='paused'&&(r.category!==null||(r.focusMinutes||0)!==0))throw Error('暂停记录不应计入三类预算');
+      if(r.resumeActivity){snapshot({...r.resumeActivity,id:r.resumeActivity.activityId});if(r.kind!=='paused'||!Number.isFinite(r.resumeActivity.focusElapsedMs)||r.resumeActivity.focusElapsedMs<0||!Number.isFinite(r.resumeActivity.focusMinutes)||r.resumeActivity.focusMinutes<0||r.resumeActivity.focusMinutes>1440||typeof r.resumeActivity.note!=='string'||r.resumeActivity.note.length>500)throw Error('暂停恢复信息不正确');}
     };
     s.records.forEach(r=>validSeg(r,true));if(s.active)validSeg(s.active,false);
     if(s.trackingStart!==null) {
@@ -158,7 +197,7 @@
     let wrapper;try{wrapper=JSON.parse(text);}catch{throw Error('文件不是有效的 JSON');}
     if(wrapper.app!=='eight-hours'||!wrapper.data)throw Error('请选择本应用导出的备份');
     validateState(wrapper.data);
-    const s=clone(wrapper.data);s.undo=null;s.revision=Number.isInteger(s.revision)?s.revision:0;return s;
+    const s=migrateState(wrapper.data);s.undo=null;s.revision=Number.isInteger(s.revision)?s.revision:0;return s;
   }
-  return {MIN,HOUR,CATEGORIES,DEFAULT_ACTIVITIES,uid,clone,dateKey,bounds,createState,switchActivity,undoSwitch,daySegments,totals,editInterval,updateNote,coursesForDay,plannedMinutes,validateCourse,validateState,parseBackup,clockMinutes};
+  return {MIN,HOUR,CATEGORIES,DEFAULT_ACTIVITIES,uid,clone,dateKey,bounds,createState,migrateState,isPaused,elapsed,pauseRecording,resumeRecording,deleteDate,switchActivity,undoSwitch,daySegments,totals,editInterval,updateNote,coursesForDay,plannedMinutes,validateCourse,validateState,parseBackup,clockMinutes};
 });
